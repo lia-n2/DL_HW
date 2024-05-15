@@ -107,8 +107,8 @@ class MLP(nn.Module):
         self.gelu = nn.GELU()
 
     def forward(self, x):
-        # x = self.self.gelu(self.c_fc(x))
-        x = self.act(self.c_fc(x)) * self.c_proj(x)  # Element-wise multiplication after activation
+        x = self.self.gelu(self.c_fc(x))
+        # x = self.act(self.c_fc(x)) * self.c_proj(x) # Uncomment For Question4  # Element-wise multiplication after acti
         x = self.c_out(x)  # Output layer
         return x
 
