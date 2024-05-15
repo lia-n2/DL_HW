@@ -31,6 +31,7 @@ class CausalSelfAttention(nn.Module):
     def __init__(self, config):
         super().__init__()
         assert config.n_embd % config.n_head == 0
+        self.config = config
         self.wind = config.wind
         # Use the provided key and query sizes, or default to 'n_embd/n_head'
         self.n_key = config.n_key if config.n_key is not None else config.n_embd // config.n_head
@@ -48,12 +49,20 @@ class CausalSelfAttention(nn.Module):
         self.n_embd = config.n_embd
         self.dropout = config.dropout
         # flash attention make GPU go brrrrr but support is only in PyTorch >= 2.0
-        self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
+        self.flash = False #hasattr(torch.nn.functional, 'scaled_dot_product_attention')
         if not self.flash:
             print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
             # causal mask to ensure that attention is only applied to the left in the input sequence
             self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
                                         .view(1, 1, config.block_size, config.block_size))
+
+        self.mask = torch.tril(torch.zeros(self.config.block_size+self.config.n_regist, self.config.block_size+self.config.n_regist)).view(1, 1, self.config.block_size+self.config.n_regist, self.config.block_size+self.config.n_regist).cuda()
+
+        if self.config.wind > 0:
+          for i in range(self.config.block_size+self.config.n_regist):
+            window_start = max(0, i-self.config.wind)
+            window_end = i+1
+            self.mask[:, :, i:i+1, window_start:window_end] = 1
 
     def forward(self, x):
         B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
@@ -63,9 +72,7 @@ class CausalSelfAttention(nn.Module):
         q = self.query_proj(x).view(B, T, self.n_head, self.n_query).transpose(1, 2)  # (B, nh, T, query_size)
         v = self.value_proj(x).view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, value_size)
         # Replace the full causal mask with a sliding window mask
-        mask = (torch.arange(T, device=x.device).unsqueeze(1) - torch.arange(T, device=x.device).unsqueeze(
-            0)) < self.wind
-        mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
+
 
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
         if self.flash:
@@ -74,7 +81,8 @@ class CausalSelfAttention(nn.Module):
         else:
         # Apply the sliding window mask to the attention scores
             att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-            att = att + mask  # Apply the sliding window mask here
+            # att = att + mask  # Apply the sliding window mask here
+            att = att.masked_fill(self.mask[:, :, :T, :T] == 0, float('-inf'))
             att = F.softmax(att, dim=-1)
             att = self.attn_dropout(att)
             y = att @ v
