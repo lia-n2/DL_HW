@@ -104,8 +104,10 @@ class MLP(nn.Module):
         self.c_out = nn.Linear(4 * config.n_embd, config.n_embd)
         # Define the activation function
         self.act = nn.ReLU()
+        self.gelu = nn.GELU()
 
     def forward(self, x):
+        # x = self.self.gelu(self.c_fc(x))
         x = self.act(self.c_fc(x)) * self.c_proj(x)  # Element-wise multiplication after activation
         x = self.c_out(x)  # Output layer
         return x
