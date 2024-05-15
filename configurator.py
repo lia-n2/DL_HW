@@ -17,10 +17,6 @@ comes up with a better simple Python solution I am all ears.
 import sys
 from ast import literal_eval
 
-default_config = {
-    'wind': 0,  # Add a default value for 'wind'
-}
-
 for arg in sys.argv[1:]:
     if '=' not in arg:
         # assume it's the name of a config file
@@ -35,10 +31,7 @@ for arg in sys.argv[1:]:
         assert arg.startswith('--')
         key, val = arg.split('=')
         key = key[2:]
-        if key in ['wind', 'n_regist']:
-            # Convert wind, and n_regist to integers
-            globals()[key] = int(val)
-        elif key in globals():
+        if key in globals():
             try:
                 # attempt to eval it it (e.g. if bool, number, or etc)
                 attempt = literal_eval(val)
