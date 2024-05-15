@@ -140,7 +140,8 @@ class GPT(nn.Module):
         self.config = config
         # Initialize register tokens if n_regist > 0
         if config.n_regist > 0:
-            self.register_tokens = nn.Parameter(torch.zeros(1, config.n_regist, config.n_embd))
+            self.register_tokens = nn.Parameter(torch.zeros(config.n_regist, config.n_embd))
+            self.register_tokens_layer = nn.Linear(config.block_size+config.n_regist, config.block_size)
 
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd),
@@ -196,14 +197,22 @@ class GPT(nn.Module):
         tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
         pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
         x = self.transformer.drop(tok_emb + pos_emb)
+
+        if self.config.n_regist > 0:
+            # Expand register tokens to match the batch size and concatenate
+            # register_tokens = self.register_tokens.expand(idx.size(0), -1, -1)
+            register_tokens = self.register_tokens.unsqueeze(0).repeat(b, 1, 1)
+            x = torch.cat((x, register_tokens), dim=1)
+
         for block in self.transformer.h:
             x = block(x)
         x = self.transformer.ln_f(x)
         # If register tokens are used, concatenate them with the input at each layer
+
         if self.config.n_regist > 0:
-            # Expand register tokens to match the batch size and concatenate
-            register_tokens = self.register_tokens.expand(idx.size(0), -1, -1)
-            x = torch.cat((x, register_tokens), dim=1)
+            x = x.transpose(2, 1)
+            x = self.register_tokens_layer(x)
+            x = x.transpose(2, 1)
 
         if targets is not None:
             # if we are given some desired targets also calculate the loss
