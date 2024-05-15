@@ -31,6 +31,7 @@ class CausalSelfAttention(nn.Module):
     def __init__(self, config):
         super().__init__()
         assert config.n_embd % config.n_head == 0
+        self.wind = config.wind
         # Use the provided key and query sizes, or default to 'n_embd/n_head'
         self.n_key = config.n_key if config.n_key is not None else config.n_embd // config.n_head
         self.n_query = config.n_query if config.n_query is not None else config.n_embd // config.n_head
@@ -61,22 +62,25 @@ class CausalSelfAttention(nn.Module):
         k = self.key_proj(x).view(B, T, self.n_head, self.n_key).transpose(1, 2)  # (B, nh, T, key_size)
         q = self.query_proj(x).view(B, T, self.n_head, self.n_query).transpose(1, 2)  # (B, nh, T, query_size)
         v = self.value_proj(x).view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, value_size)
+        # Replace the full causal mask with a sliding window mask
+        mask = (torch.arange(T, device=x.device).unsqueeze(1) - torch.arange(T, device=x.device).unsqueeze(
+            0)) < self.wind
+        mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
 
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
         if self.flash:
             # efficient attention using Flash Attention CUDA kernels
             y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
         else:
-            # causal self-attention; Self-attend: (B, nh, T, key_size) x (B, nh, T, query_size) -> (B, nh, T, T)
-            att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(self.n_key))
-            att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
+        # Apply the sliding window mask to the attention scores
+            att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+            att = att + mask  # Apply the sliding window mask here
             att = F.softmax(att, dim=-1)
             att = self.attn_dropout(att)
-            y = att @ v  # (B, nh, T, T) x (B, nh, T, value_size) -> (B, nh, T, value_size)
-
+            y = att @ v
         y = y.transpose(1, 2).contiguous().view(B, T, C)  # re-assemble all head outputs side by side
 
-        # output projection
+    # output projection
         y = self.resid_dropout(self.c_proj(y))
         return y
 
@@ -84,16 +88,18 @@ class MLP(nn.Module):
 
     def __init__(self, config):
         super().__init__()
-        self.c_fc    = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
-        self.gelu    = nn.GELU()
-        self.c_proj  = nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
-        self.dropout = nn.Dropout(config.dropout)
+        # Define the first fully connected layer
+        self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd)
+        # Define the second fully connected layer for gating
+        self.c_proj = nn.Linear(config.n_embd, 4 * config.n_embd)
+        # Define the third fully connected layer for output
+        self.c_out = nn.Linear(4 * config.n_embd, config.n_embd)
+        # Define the activation function
+        self.act = nn.ReLU()
 
     def forward(self, x):
-        x = self.c_fc(x)
-        x = self.gelu(x)
-        x = self.c_proj(x)
-        x = self.dropout(x)
+        x = self.act(self.c_fc(x)) * self.c_proj(x)  # Element-wise multiplication after activation
+        x = self.c_out(x)  # Output layer
         return x
 
 class Block(nn.Module):
@@ -122,6 +128,7 @@ class GPTConfig:
     n_query: int = None  # Size of query vectors
     dropout: float = 0.0
     bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
+    n_regist: int = 0  # Default number of register tokens if not provided
 
 class GPT(nn.Module):
 
@@ -130,6 +137,9 @@ class GPT(nn.Module):
         assert config.vocab_size is not None
         assert config.block_size is not None
         self.config = config
+        # Initialize register tokens if n_regist > 0
+        if config.n_regist > 0:
+            self.register_tokens = nn.Parameter(torch.zeros(1, config.n_regist, config.n_embd))
 
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd),
@@ -188,6 +198,11 @@ class GPT(nn.Module):
         for block in self.transformer.h:
             x = block(x)
         x = self.transformer.ln_f(x)
+        # If register tokens are used, concatenate them with the input at each layer
+        if self.config.n_regist > 0:
+            # Expand register tokens to match the batch size and concatenate
+            register_tokens = self.register_tokens.expand(idx.size(0), -1, -1)
+            x = torch.cat((x, register_tokens), dim=1)
 
         if targets is not None:
             # if we are given some desired targets also calculate the loss
