@@ -33,6 +33,12 @@ class CausalSelfAttention(nn.Module):
         assert config.n_embd % config.n_head == 0
         self.config = config
         self.wind = config.wind
+        # Use the provided key and query sizes, or default to 'n_embd/n_head'
+        self.n_key = config.n_key if config.n_key is not None else config.n_embd // config.n_head
+        self.n_query = config.n_query if config.n_query is not None else config.n_embd // config.n_head
+        # key, query, value projections for all heads
+        self.key_proj = nn.Linear(config.n_embd, config.n_head * self.n_key, bias=config.bias)
+        self.query_proj = nn.Linear(config.n_embd, config.n_head * self.n_query, bias=config.bias)
         self.value_proj = nn.Linear(config.n_embd, config.n_head * (config.n_embd // config.n_head), bias=config.bias)
         # output projection
         self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
@@ -42,8 +48,6 @@ class CausalSelfAttention(nn.Module):
         self.n_head = config.n_head
         self.n_embd = config.n_embd
         self.dropout = config.dropout
-        # key, query, value projections for all heads, but in a batch
-        self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
         # flash attention make GPU go brrrrr but support is only in PyTorch >= 2.0
         self.flash = False #hasattr(torch.nn.functional, 'scaled_dot_product_attention')
         if not self.flash:
@@ -63,26 +67,28 @@ class CausalSelfAttention(nn.Module):
     def forward(self, x):
         B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
 
-        q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
-        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
-        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
-        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+        # calculate query, key, values for all heads in batch and move head forward to be the batch dim
+        k = self.key_proj(x).view(B, T, self.n_head, self.n_key).transpose(1, 2)  # (B, nh, T, key_size)
+        q = self.query_proj(x).view(B, T, self.n_head, self.n_query).transpose(1, 2)  # (B, nh, T, query_size)
+        v = self.value_proj(x).view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, value_size)
+        # Replace the full causal mask with a sliding window mask
+
 
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
         if self.flash:
             # efficient attention using Flash Attention CUDA kernels
             y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
-
         else:
-            # manual implementation of attention
+        # Apply the sliding window mask to the attention scores
             att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-            att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
+            # att = att + mask  # Apply the sliding window mask here
+            att = att.masked_fill(self.mask[:, :, :T, :T] == 0, float('-inf'))
             att = F.softmax(att, dim=-1)
             att = self.attn_dropout(att)
-            y = att @ v  # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
+            y = att @ v
         y = y.transpose(1, 2).contiguous().view(B, T, C)  # re-assemble all head outputs side by side
 
-        # output projection
+    # output projection
         y = self.resid_dropout(self.c_proj(y))
         return y
 
@@ -101,8 +107,8 @@ class MLP(nn.Module):
         self.gelu = nn.GELU()
 
     def forward(self, x):
-        # x = self.self.gelu(self.c_fc(x)) # Uncomment For Question4
-        x = self.act(self.c_fc(x)) * self.c_proj(x) # Element-wise multiplication after activation
+        # x = self.self.gelu(self.c_fc(x))
+        x = self.act(self.c_fc(x)) * self.c_proj(x)  # Element-wise multiplication after activation
         x = self.c_out(x)  # Output layer
         return x
 
@@ -127,6 +133,9 @@ class GPTConfig:
     n_layer: int = 12
     n_head: int = 12
     n_embd: int = 768
+    # New parameters for key and query vector sizes
+    n_key: int = None  # Size of key vectors
+    n_query: int = None  # Size of query vectors
     dropout: float = 0.0
     bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
     n_regist: int = 0  # Default number of register tokens if not provided
