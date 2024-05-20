@@ -74,9 +74,19 @@ class CausalSelfAttention(nn.Module):
             y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
         else:
         # Apply the sliding window mask to the attention scores
+
+
             att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
             # att = att + mask  # Apply the sliding window mask here
             att = att.masked_fill(self.mask[:, :, :T, :T] == 0, float('-inf'))
+
+            #  ## Softmax custom Uncomment for q7
+            # att = torch.nan_to_num(att)
+            # maxes = torch.max(att, 1, keepdim=True)[0]
+            # x_exp = torch.abs(att-maxes)
+            # x_exp_sum = torch.sum(x_exp, 1, keepdim=True)
+            # att = x_exp/(x_exp_sum+1e-8)
+
             att = F.softmax(att, dim=-1)
             att = self.attn_dropout(att)
             y = att @ v
