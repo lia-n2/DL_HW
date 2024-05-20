@@ -33,13 +33,8 @@ class CausalSelfAttention(nn.Module):
         assert config.n_embd % config.n_head == 0
         self.config = config
         self.wind = config.wind
-        # Use the provided key and query sizes, or default to 'n_embd/n_head'
-        self.n_key = config.n_key if config.n_key is not None else config.n_embd // config.n_head
-        self.n_query = config.n_query if config.n_query is not None else config.n_embd // config.n_head
-        # key, query, value projections for all heads
-        self.key_proj = nn.Linear(config.n_embd, config.n_head * self.n_key, bias=config.bias)
-        self.query_proj = nn.Linear(config.n_embd, config.n_head * self.n_query, bias=config.bias)
-        self.value_proj = nn.Linear(config.n_embd, config.n_head * (config.n_embd // config.n_head), bias=config.bias)
+        # key, query, value projections for all heads, but in a batch
+        self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
         # output projection
         self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
         # regularization
@@ -49,7 +44,7 @@ class CausalSelfAttention(nn.Module):
         self.n_embd = config.n_embd
         self.dropout = config.dropout
         # flash attention make GPU go brrrrr but support is only in PyTorch >= 2.0
-        self.flash = False #hasattr(torch.nn.functional, 'scaled_dot_product_attention')
+        self.flash = True #hasattr(torch.nn.functional, 'scaled_dot_product_attention')
         if not self.flash:
             print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
             # causal mask to ensure that attention is only applied to the left in the input sequence
@@ -68,11 +63,10 @@ class CausalSelfAttention(nn.Module):
         B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
 
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
-        k = self.key_proj(x).view(B, T, self.n_head, self.n_key).transpose(1, 2)  # (B, nh, T, key_size)
-        q = self.query_proj(x).view(B, T, self.n_head, self.n_query).transpose(1, 2)  # (B, nh, T, query_size)
-        v = self.value_proj(x).view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, value_size)
-        # Replace the full causal mask with a sliding window mask
-
+        q, k, v  = self.c_attn(x).split(self.n_embd, dim=2)
+        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
 
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
         if self.flash:
@@ -97,19 +91,21 @@ class MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
         # Define the first fully connected layer
-        self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd)
+        self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
         # Define the second fully connected layer for gating
-        self.c_proj = nn.Linear(config.n_embd, 4 * config.n_embd)
+        self.c_proj = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
         # Define the third fully connected layer for output
-        self.c_out = nn.Linear(4 * config.n_embd, config.n_embd)
+        self.c_out = nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
         # Define the activation function
         self.act = nn.ReLU()
         self.gelu = nn.GELU()
+        self.dropout = nn.Dropout(config.dropout)
 
     def forward(self, x):
-        # x = self.gelu(self.c_fc(x)) #Uncomment for question 4
-        x = self.act(self.c_fc(x)) * self.c_proj(x)  # Element-wise multiplication after activation
+        x = self.gelu(self.c_fc(x))
+        # x = self.act(self.c_fc(x)) * self.c_proj(x)  # Uncomment for question 4. Element-wise multiplication after activation
         x = self.c_out(x)  # Output layer
+        x = self.dropout(x)
         return x
 
 class Block(nn.Module):
@@ -133,9 +129,6 @@ class GPTConfig:
     n_layer: int = 12
     n_head: int = 12
     n_embd: int = 768
-    # New parameters for key and query vector sizes
-    n_key: int = None  # Size of key vectors
-    n_query: int = None  # Size of query vectors
     dropout: float = 0.0
     bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
     n_regist: int = 0  # Default number of register tokens if not provided
