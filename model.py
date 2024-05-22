@@ -51,13 +51,14 @@ class CausalSelfAttention(nn.Module):
             self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
                                         .view(1, 1, config.block_size, config.block_size))
 
-        self.mask = torch.tril(torch.zeros(self.config.block_size+self.config.n_regist, self.config.block_size+self.config.n_regist)).view(1, 1, self.config.block_size+self.config.n_regist, self.config.block_size+self.config.n_regist).cuda()
+        self.mask = torch.tril(torch.ones(self.config.block_size+self.config.n_regist, self.config.block_size+self.config.n_regist)).view(1, 1, self.config.block_size+self.config.n_regist, self.config.block_size+self.config.n_regist).cuda()
 
         if self.config.wind > 0:
-          for i in range(self.config.block_size+self.config.n_regist):
-            window_start = max(0, i-self.config.wind)
-            window_end = i+1
-            self.mask[:, :, i:i+1, window_start:window_end] = 1
+            self.mask = torch.tril(torch.zeros(self.config.block_size+self.config.n_regist, self.config.block_size+self.config.n_regist)).view(1, 1, self.config.block_size+self.config.n_regist, self.config.block_size+self.config.n_regist).cuda()
+            for i in range(self.config.block_size+self.config.n_regist):
+                window_start = max(0, i-self.config.wind)
+                window_end = i+1
+                self.mask[:, :, i:i+1, window_start:window_end] = 1
 
     def forward(self, x):
         B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
@@ -113,7 +114,7 @@ class MLP(nn.Module):
 
     def forward(self, x):
         x = self.gelu(self.c_fc(x))
-        # x = self.act(self.c_fc(x)) * self.c_proj(x)  # Uncomment for question 4. Element-wise multiplication after activation
+#         x = self.act(self.c_fc(x)) * self.c_proj(x)  # Uncomment for question 4. Element-wise multiplication after activation
         x = self.c_out(x)  # Output layer
         x = self.dropout(x)
         return x
